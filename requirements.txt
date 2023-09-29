@@ -1,0 +1,16 @@
+gluonts
+mxnet
+numpy==1.18.5
+pandas
+scikit-learn
+codecarbon
+autokeras
+
+# rating and results generation (ELEx)
+dash
+plotly
+dash-bootstrap-components
+reportlab
+PyMuPDF
+qrcode
+pint
