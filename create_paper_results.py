@@ -15,16 +15,37 @@ COL_SEL = 'MASE'
 
 
 FT_NAMES = {
-    'model_choice': 'Model Choice',
-    'freq': 'Seasoniality',
-    'forecast_horizon': 'Forecast Horizon',
-    'num_ts': 'Number of Series',
-    'avg_ts_len': 'Avg Series Length',
-    'avg_ts_mean': 'Avg Series Mean',
-    'avg_ts_min': 'Avg Series Min',
-    'avg_ts_max': 'Avg Series Max',
-    'contain_equal_length_True': 'Equally long?'
+    'model_choice':                 'Model Choice',
+    'freq':                         'Seasoniality',
+    'forecast_horizon':             'Fc Horizon',
+    'num_ts':                       'Num Series',
+    'avg_ts_len':                   'Avg Length',
+    'avg_ts_mean':                  'Avg Mean',
+    'avg_ts_min':                   'Avg Min',
+    'avg_ts_max':                   'Avg Max',
+    'contain_equal_length_True':    'Equal length'
 }
+
+
+def get_ds_short(ds_name):
+    return ds_name[:4] + '..' + ds_name[-3:] if len(ds_name) > 9 else ds_name
+
+
+def format_val(value):
+    if value >= 1000000:
+        return f'{np.round(value/1000000, 1)}e6'
+    if value >= 100000:
+        return f'{np.round(value/100000, 1)}e5'
+    if value >= 10000:
+        return f'{np.round(value/10000, 1)}e4'
+    if value >= 100:
+        return str(np.round(value))[:-2]
+    return f'{value:4.2f}'[:4]
+
+
+def rgb_to_rgba(rgb, alpha):
+    return rgb.replace('rgb', 'rgba').replace(')', f',{alpha:3.1f})')
+
 
 def create_all(database, meta, seed=0):
     import plotly.graph_objects as go
@@ -34,9 +55,11 @@ def create_all(database, meta, seed=0):
     from mlprops.elex.graphs import create_scatter_graph, add_rating_background
     from mlprops.elex.util import RATING_COLORS, RATING_COLOR_SCALE
 
+    monash = pd.read_csv('monash.csv', delimiter=';', index_col='Dataset')
+    monash = monash.replace('-', np.nan).astype(float)
+
     fix_seed(seed)
     meta_learned_db = pd.read_pickle('results/meta_learn_results.pkl')
-    autokeras = pd.read_pickle('results/autokeras.pkl')
     os.chdir('paper_results')
 
     print('Generating tables')
@@ -59,13 +82,11 @@ def create_all(database, meta, seed=0):
         outf.write(final_text)
     
     #### MODEL X DATA PERFORMANCE
-    models = pd.unique(database['model'])
+    models = sorted(pd.unique(database['model']).tolist())
     rows = ['Data set & ' + ' & '.join(meta['model'][mod]['short'] for mod in models) + r' \\' + '\n' + r'        \midrule']
     for ds, data in database.groupby(['dataset_orig']):
         subd = data[data['dataset'] == ds]
-        ds_name = meta['dataset'][ds]['name']
-        ds_name_short = ds_name[:5] + '..' + ds_name[-3:] if len(ds_name) > 10 else ds_name
-        row = [ds_name_short]
+        row = [ get_ds_short(meta['dataset'][ds]['name']) ]
         results = [subd[subd['model'] == mod]['compound_index'].iloc[0] for mod in models]
         max_r = max(results)
         for res in results:
@@ -80,50 +101,65 @@ def create_all(database, meta, seed=0):
         outf.write(final_text)
 
     ######### METHOD COMPARISON TABLE
-    models = pd.unique(database['model'])
     rows = [
-        ' & '.join(['Data set', r'\multicolumn{2}{c}{X-PCR}', r'\multicolumn{2}{c}{Random}', r'\multicolumn{2}{c}{AutoKeras}', r'\multicolumn{2}{c}{Exhaustive} \\']),
-        ' & '.join([ ' ' ] + [f'{COL_SEL}', 'kWh'] * 4) + r' \\',
+        ' & '.join(['Data set'] + [r'\multicolumn{3}{c}{' + mod + '}' for mod in ['AutoXPCR (ours)', 'AutoForecast \cite{abdallah/etal/22}', 'AutoGluonTS \cite{shchur_autogluon-timeseries_2023}', 'AutoKeras \cite{jin2019auto}', 'AutoSklearn \cite{JMLR:v23:21-0992}', 'Exhaustive']]) + r' \\',
+        ' & '.join([ ' ' ] + ['PCR', r'$f_{\text{MASE}}$', 'kWh'] * 6) + r' \\',
         r'\midrule',
     ]
     for idx, ((ds), data) in enumerate(meta_learned_db.groupby(['dataset'])):
         if data['dataset_orig'].iloc[0] == ds:
-            ds_name = meta['dataset'][ds]['name']
-            ds_name_short = ds_name[:5] + '..' + ds_name[-3:] if len(ds_name) > 10 else ds_name
-            row = [ds_name_short]
-            # best recommendation
-            sort_rec = data.sort_values(f'{COL_SEL}_pred', ascending=False)
-            sel = sort_rec.iloc[0]
-            values = [ (sel[COL_SEL]['value'], sel['train_power_draw']['value'] / 3.6e3) ]
+            row = [ get_ds_short(meta['dataset'][ds]['name']) ]
+
+            # best XPCR
+            xpcr_rec_config = data.sort_values('compound_index_pred', ascending=False).iloc[0]
+            xpcr = database[database['configuration'] == xpcr_rec_config['configuration']].iloc[0]
+            assert(xpcr['compound_index'] == xpcr_rec_config['compound_index'])
+            values = [ (xpcr['compound_index'], xpcr[COL_SEL]['index'], xpcr['train_power_draw']['value'] / 3.6e3) ]
+
+            # AutoForecast / simulates metsa-learned selection based on best estimated error
+            aufo_rec_config = data.sort_values(f'{COL_SEL}_pred', ascending=False).iloc[0]
+            aufo = database[database['configuration'] == aufo_rec_config['configuration']].iloc[0]
+            assert(aufo['compound_index'] == aufo_rec_config['compound_index'])
+            values.append( (aufo['compound_index'], aufo[COL_SEL]['index'], aufo['train_power_draw']['value'] / 3.6e3) )
             # random
-            sel = sort_rec.iloc[np.random.randint(1, sort_rec.shape[0])]
-            values.append( (sel[COL_SEL]['value'], sel['train_power_draw']['value'] / 3.6e3) )
-            # autokeras
-            auto = autokeras[autokeras['dataset'] == ds]
-            auto = auto.sort_values('task')
-            # auto = auto.fillna(method='bfill').head(1)
-            values.append( (auto[COL_SEL].values[0], auto['train_power_draw'].values[1] / 3.6e3) )
-            # testing all
-            lowest_err = min([e['value'] for e in data[COL_SEL]])
-            values.append( (lowest_err, np.sum([val['value'] / 3.6e3 for val in data['train_power_draw']]) ) )
+            # sel_rand = sort_xpcr.iloc[np.random.randint(1, sort_xpcr.shape[0])]
+            # values.append( (sel_rand['compound_index_true'], sel_rand[COL_SEL]['value'], sel_rand['train_power_draw']['value'] / 3.6e3) )
+    
+            # autokeras & autosklearn
+            for auto in ['autogluon', 'autokeras', 'autosklearn']:
+                auto_res = database[(database['dataset'] == ds) & (database['model'] == auto)].iloc[0]
+                qual = auto_res[COL_SEL]['index'] if isinstance(auto_res[COL_SEL], dict) else np.nan
+                powr = auto_res['train_power_draw']['value'] / 3.6e3 if isinstance(auto_res['train_power_draw'], dict) else np.nan
+                values.append( (auto_res['compound_index'], qual, powr) )
+            
+            # testing all - except automl search models, hence filter for "auto" keyword
+            exha_all = database[(database['dataset'] == ds) & ~(database['model'].str.contains('auto'))].sort_values(f'compound_index', ascending=False)
+            exha = exha_all.iloc[0]
+            exha_power = np.sum([val['value'] / 3.6e3 for val in exha_all['train_power_draw']])
+            values.append((exha['compound_index'], exha[COL_SEL]['index'], exha_power))
+
+            # sel_exha = data.sort_values('compound_index_true', ascending=False).iloc[0]
+            # values.append( (sel_exha['compound_index_true'], sel_exha[COL_SEL]['index'],  ) )
+
             # bold print best error
-            best_err = np.min([val[0] for val in values[:-1] if not np.isnan(val[0])])
-            best_ene = np.min([val[1] for val in values if not np.isnan(val[1])])
-            for idx, (err, ene) in enumerate(values):
-                if err == np.inf or np.isnan(err):
-                    row = row + ['N.A.', 'N.A.']
-                else:
-                    if err == best_err and idx < len(values) - 1:
-                        row.append(r'\textbf{' + f'{err:6.3f}'[:6] + r'}')
-                    else:
-                        row.append(f'{err:6.3f}'[:6])
-                    if ene == best_ene and idx < len(values) - 1:
-                        row.append(r'\textbf{' + f'{ene:6.3f}'[:6] + r'}')
-                    else:
-                        row.append(f'{ene:6.3f}'[:6])
+            best_idx = np.max([val[0] for val in values[:(len(values)-1)]])
+            best_err = np.max([val[1] for val in values[:(len(values)-1)]])
+            best_ene = np.min([val[2] for val in values[:(len(values)-1)]])
+            for idx, results in enumerate(values):
+                format_results = [ format_val(res) for res in results ]
+                format_results[0] = f'{results[0]:3.2f}'
+                format_results[1] = f'{results[1]:3.2f}'
+                for val_idx, best in enumerate([best_idx, best_err, best_ene]):
+                    if idx < len(values) - 1: # search competitor best result?
+                        if (val_idx < 2 and results[val_idx] == best) or (val_idx == 2 and results[val_idx] == best):
+                            format_results[val_idx] = r'\textbf{' + format_results[val_idx] + r'}'
+                    if idx == len(values) - 1: # exhaustive search (last column) best result?
+                        if (val_idx < 2 and results[val_idx] > best) or (val_idx == 2 and results[val_idx] < best):
+                            format_results[val_idx] = r'\textbf{' + format_results[val_idx] + r'}'
+                row += format_results
             rows.append(' & '.join(row) + r' \\')
     final_text = TEX_TABLE_GENERAL.replace('$DATA', '\n        '.join(rows))
-    final_text = final_text.replace('$ALIGN', r'{l|cc|cc|cc||cc}')
+    final_text = final_text.replace('$ALIGN', r'{l|ccc|ccc|ccc|ccc|ccc||ccc}')
     with open('method_comparison.tex', 'w') as outf:
         outf.write(final_text)
 
@@ -138,21 +174,48 @@ def create_all(database, meta, seed=0):
 
 
 
-    ## EXPLANATIONS
+    ### SOTA COMPARISON
+    mod_map = {meta['model'][mod]['name']: (mod, meta['model'][mod]['short']) for mod in models}
+    ds_overlap = list(reversed([ds for ds in pd.unique(database['dataset']) if ds in monash.index]))
+    ds_short = [get_ds_short(meta['dataset'][ds]['name']) for ds in ds_overlap]
+
+    for name in mod_map.keys():
+        for ds in ds_overlap:
+            subdb = database[(database['model'] == mod_map[name][0]) & (database['dataset'] == ds)]
+            monash.loc[ds, f'{name}_mase'] = subdb['MASE'].iloc[0]['value']
+            monash.loc[ds, f'{name}_compound'] = subdb['compound_index'].iloc[0]
+            if name in monash.columns:
+                monash.loc[ds, f'{name}_mase_diff'] = np.abs(subdb[COL_SEL].iloc[0]['value'] - monash.loc[ds,name])
+
+    all_rel_cols = [[col for col in monash.columns if '_mase' in col], [col for col in monash.columns if '_compound' in col], [col for col in monash.columns if '_mase_diff' in col]]
+    fig = make_subplots(rows=1, cols=3, shared_yaxes=True, horizontal_spacing=0.1, subplot_titles=([COL_SEL, 'PCR Score', 'Diff to Monash MASE']))
+    for idx, rel_cols in enumerate(all_rel_cols):
+        sub_monash = monash.loc[ds_overlap,rel_cols]
+        colorbar = {'x': 0.367*(idx+1)-0.105}
+        if idx==0:
+            sub_monash = np.log(sub_monash)
+            colorbar.update( dict(tick0=0, tickmode= 'array', tickvals=[-10, -5, 0, 5, 10, 15], ticktext=["1e-10", "1e-5", "1", "1e5", "e10", "1e15"]) )
+        fig.add_trace(go.Heatmap(go.Heatmap(z=sub_monash.values, x=[mod_map[mod.split('_')[0]][1] for mod in sub_monash], y=ds_short, colorscale=RATING_COLOR_SCALE, reversescale=idx==1, colorbar=colorbar)), row=1, col=idx+1)
+    fig.update_layout(width=PLOT_WIDTH, height=PLOT_HEIGHT*1.5, margin={'l': 0, 'r': 0, 'b': 0, 't': 18})
+    fig.write_image("sota_comparison.pdf")
+
+
+
+    # ## EXPLANATIONS
     data = meta_learned_db[meta_learned_db['dataset'] == DS_SEL]
     best_model = data.iloc[np.argmax(data['compound_index_pred'])]
     cols_to_plot = [col for col in data.columns if col.endswith('_pred') and 'compound' not in col]
     contrib = np.array([best_model[col] * best_model[col.replace('_pred', '')]['weight'] for col in cols_to_plot])
     contrib = contrib / contrib.sum() * 100
     # why recommendation?
-    title = f"Why use {meta['model'][best_model['model']]['short']} on {meta['dataset'][DS_SEL]['name']}?"
+    title = f"Q1: Why use {meta['model'][best_model['model']]['short']} on {meta['dataset'][DS_SEL]['name']}?"
     fig=px.bar(
     title=title, x=[meta['properties'][col.replace('_pred', '')]['shortname'] for col in cols_to_plot],
     y=contrib, color=np.array(contrib) * -1.0, color_continuous_scale=RATING_COLOR_SCALE
     )
-    fig.update_yaxes(title='Contribution to compound [%]')
-    fig.update_xaxes(title='', tickangle=90)
-    fig.update_layout(title_x=0.5, width=PLOT_WIDTH / 2, height=PLOT_HEIGHT, margin={'l': 0, 'r': 0, 'b': 0, 't': 24})
+    fig.update_yaxes(title='E1 - Importance [%]')
+    fig.update_xaxes(title='Property', tickangle=90)
+    fig.update_layout(title_x=0.5, title_y=0.99, width=PLOT_WIDTH / 2, height=PLOT_HEIGHT, margin={'l': 0, 'r': 0, 'b': 0, 't': 24})
     fig.update(layout_coloraxis_showscale=False)
     fig.write_image("why_recommended.pdf")
     # why ERROR estimate?
@@ -169,20 +232,21 @@ def create_all(database, meta, seed=0):
     for ft, cat in zip(transf['cat'].feature_names_in_, transf['cat'].named_steps['onehot'].categories):
         cat_names = cat_names + [f'{ft}_{val}' for val in cat[1:]]
     ft_names[transf_ind['cat']] = cat_names # categorical feature names
-    title = f"Reasons for {COL_SEL} estimate?"
+    title = f"Q2: Reasons for {COL_SEL} estimate?"
     model_idc = [i for i, ft in enumerate(ft_names) if ft.startswith('model')]
     # summarize the importance of onehot encoded model choices
     ft_names = ['Model Choice'] + [FT_NAMES[ft] for i, ft in enumerate(ft_names) if i not in model_idc]
-    ft_imp = np.array( [np.sum([ft_imp[i] for i in model_idc])] + [imp for i, imp in enumerate(ft_imp) if i not in model_idc] )
+    ft_imp = np.array( [np.sum([ft_imp[i] for i in model_idc])] + [imp for i, imp in enumerate(ft_imp) if i not in model_idc] ) * 100
     fig=px.bar(title=title, x=ft_names, y=ft_imp, color=ft_imp * -1.0, color_continuous_scale=RATING_COLOR_SCALE)
-    fig.update_yaxes(title='Feature importance')
-    fig.update_xaxes(title='', tickangle=90)
-    fig.update_layout(title_x=0.5, width=PLOT_WIDTH / 2, height=PLOT_HEIGHT, margin={'l': 0, 'r': 0, 'b': 0, 't': 24})
+    fig.update_yaxes(title='E2 - Importance [%]')
+    fig.update_xaxes(title='Meta-feature', tickangle=90)
+    fig.update_layout(title_x=0.5, title_y=0.99, width=PLOT_WIDTH / 2, height=PLOT_HEIGHT, margin={'l': 0, 'r': 0, 'b': 0, 't': 24})
     fig.update(layout_coloraxis_showscale=False)
     fig.write_image("why_error.pdf")
 
 
-    # ### PCR trade-offs scatters
+
+    ### PCR trade-offs scatters
     for xaxis, yaxis in [['running_time', COL_SEL], ['train_power_draw', 'RMSE']]:#, ['parameters', 'MAPE']]:
         for idx, (ds, data) in enumerate(database.groupby(['dataset_orig'])):
             # if ds == DS_SEL:
@@ -213,9 +277,12 @@ def create_all(database, meta, seed=0):
             scatter.write_image(f'landscape_{ds}_{xaxis}_{yaxis}.pdf')
 
 
+
     ######## META LEARN RESULTS #######
     pred_cols = [col.replace('_true', '') for col in meta_learned_db.columns if '_true' in col and 'compound' not in col]
     pred_col_shortnames = [meta['properties'][col]['shortname'] for col in pred_cols]
+    star_cols = pred_cols + [pred_cols[0]]
+    star_cols_short = pred_col_shortnames + [pred_col_shortnames[0]]
 
     # access statistics per data set
     top_increasing_k_stats = {}
@@ -233,53 +300,43 @@ def create_all(database, meta, seed=0):
 
         if data['dataset_orig'].iloc[0] == ds:
             ######### STAR PLOTS with recommendation vs best
-            true_best = data.sort_values(f'compound_index_true', ascending=False).iloc[0]
-            pred_best = data.sort_values(f'compound_index_pred', ascending=False).iloc[0]
+            pred_afo = data.sort_values(f'MASE_pred', ascending=False).iloc[0]['model']
+            pred_xpcr = data.sort_values(f'compound_index_pred', ascending=False).iloc[0]['model']
             fig = go.Figure()
-            # the first pred col gives the real assessed compound index
-            for model, col, m_str in zip([true_best, pred_best], [RATING_COLORS[0], RATING_COLORS[2]], ['Best', 'Pred']):
-                name = meta['model'][model['model']]['short']
+            for model, m_str, col_idx in zip([pred_xpcr, pred_afo, 'autogluon'], ['XPCR', 'AFo', 'AGl'], [0, 2, 4]):
+                name = m_str if meta['model'][model]['short'] == m_str else f"{m_str} / {meta['model'][model]['short']}"
+                row = database[(database['dataset'] == ds) & (database['model'] == model)].iloc[0]
                 fig.add_trace(go.Scatterpolar(
-                    r=[model[col + '_true'] for col in pred_cols], line={'color': col},
-                    theta=pred_col_shortnames, fill='toself', name=f'Score ({name} - {m_str}): {model["compound_index"]:4.2f}'
+                    r=[row[col]['index'] for col in star_cols], line={'color': RATING_COLORS[col_idx]}, fillcolor=rgb_to_rgba(RATING_COLORS[col_idx], 0.1),
+                    theta=star_cols_short, fill='toself', name=f'Score ({name}): {row["compound_index"]:4.2f}'
                 ))
             fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True)), width=PLOT_WIDTH*0.33, height=PLOT_HEIGHT, title_y=1.0, title_x=0.5, title_text=meta['dataset'][ds]['name'],
-                legend=dict( yanchor="bottom", y=1.06, xanchor="center", x=0.5), margin={'l': 0, 'r': 0, 'b': 15, 't': 70}
+                polar=dict(radialaxis=dict(visible=True)), width=PLOT_WIDTH*0.25, height=PLOT_HEIGHT*1.2, title_y=0.99, title_x=0.5, title_text=meta['dataset'][ds]['name'],
+                legend=dict( yanchor="bottom", y=1.22, xanchor="center", x=0.5), margin={'l': 0, 'r': 0, 'b': 17, 't': 120}
             )
             fig.write_image(f'true_best_{ds}.pdf')
 
     
-    
 
     ###### increasing top k curves
-    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, x_title='k (testing top-k recommendations)', y_title="Relative value", subplot_titles=[COL_SEL, 'Power Draw'], horizontal_spacing=0.02)
-
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, x_title='k (testing top-k recommendations)', y_title="Relative value", subplot_titles=[f'Best possible {COL_SEL}', 'Total power draw'], horizontal_spacing=0.05)
     for ds, values in top_increasing_k_stats.items():
         err = values['err']
         ene = values['ene']
         k = np.arange(1, len(err) + 1)
         fig.add_trace(go.Scatter(x=k, y=err, mode='lines', line=dict(color='rgba(229,36,33,0.3)')), row=1, col=1)
         fig.add_trace(go.Scatter(x=k, y=ene, mode='lines', line=dict(color='rgba(229,36,33,0.3)')), row=1, col=2)
-    
     avg_err = np.array([np.array(val['err']) for val in top_increasing_k_stats.values()]).mean(axis=0)
     avg_ene = np.array([np.array(val['ene']) for val in top_increasing_k_stats.values()]).mean(axis=0)
-    fig.add_trace(go.Scatter(
-        x=k, y=avg_err, mode='lines', line=dict(color='rgba(0,0,0,1.0)')), row=1, col=1
-    )
-    fig.add_trace(go.Scatter(
-        x=k, y=avg_ene, mode='lines', line=dict(color='rgba(0,0,0,1.0)')), row=1, col=2
-    )
-    fig.update_layout(
-        width=PLOT_WIDTH, height=PLOT_HEIGHT,
-        showlegend=False, margin={'l': 60, 'r': 0, 'b': 60, 't': 25}
-    )
-    fig.write_image(f'increasing k.pdf')
+    fig.add_trace( go.Scatter(x=k, y=avg_err, mode='lines', line=dict(color='rgba(0,0,0,1.0)')), row=1, col=1)
+    fig.add_trace( go.Scatter(x=k, y=avg_ene, mode='lines', line=dict(color='rgba(0,0,0,1.0)')), row=1, col=2)
+    fig.update_layout( width=PLOT_WIDTH, height=PLOT_HEIGHT*1.2, showlegend=False, margin={'l': 57, 'r': 0, 'b': 60, 't': 17} )
+    fig.write_image(f'increasing_k.pdf')
 
 
     # ERRORS OF PREDICTION
-    meta['properties']['compound_index'] = {'shortname': 'Compound', 'weight': 1.0}
-    meta['properties']['compound_index_direct'] = {'shortname': 'Direct comp', 'weight': 1.0}
+    meta['properties']['compound_index'] = {'shortname': 'XPCR Score', 'weight': 1.0}
+    meta['properties']['compound_index_direct'] = {'shortname': 'Direct Score', 'weight': 1.0}
     pred_cols = ['compound_index', 'compound_index_direct'] + pred_cols
     result_scores = {
         'Error (a)': {},
@@ -318,7 +375,6 @@ def create_all(database, meta, seed=0):
             result_scores['Inters (e)'][col].append(np.mean(overlap))
 
     fig = make_subplots(rows=1, cols=len(result_scores), subplot_titles=[key for key in result_scores.keys()], shared_yaxes=True, horizontal_spacing=0.02)
-
     max_x = []
     for plot_idx, results in enumerate(result_scores.values()):
         x, y, e, w = zip(*reversed([(np.mean(vals), meta['properties'][key]['shortname'], np.std(vals)
@@ -331,12 +387,9 @@ def create_all(database, meta, seed=0):
             ), row=1, col=plot_idx + 1
         )
         max_x.append(max(x) + (max(x) / 10))
-    fig.update_layout(width=PLOT_WIDTH, height=PLOT_HEIGHT, showlegend=False, margin={'l': 0, 'r': 0, 'b': 0, 't': 24})
-    fig.update_layout(
-        xaxis_range = [0, max_x[0]],
-        xaxis2_range = [0, max_x[1]],
-        xaxis3_range = [0, max_x[2]],
-        xaxis4_range = [0, max_x[3]],
-        xaxis5_range = [0, max_x[4]],
+    fig.update_layout(width=PLOT_WIDTH, title_y=0.99, title_x=0.5, height=PLOT_HEIGHT*1.2, 
+                      showlegend=False, margin={'l': 0, 'r': 0, 'b': 0, 't': 17},
+                      xaxis_range=[0, max_x[0]], xaxis2_range=[0, max_x[1]], xaxis3_range=[0, max_x[2]],
+                      xaxis4_range=[0, max_x[3]], xaxis5_range=[0, max_x[4]],
     )
     fig.write_image(f'quality_of_model_recommendation.pdf')
